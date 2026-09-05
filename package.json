@@ -1,0 +1,11 @@
+{
+  "name": "backyard-coach-shared",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "type": "module",
+  "description": "Shared logic between backyard-coach (web) and backyard-coach-mobile (native) — pure JS, no React/DOM/RN dependencies, so it works identically on both platforms.",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
