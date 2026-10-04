@@ -458,12 +458,34 @@ export function getDrillsForStation(cfg, station, ageGroup, dbDrills = {}) {
   return pool?.[ageGroup] || pool?.['all'] || []
 }
 
+// WARM-UP IS NOT SCALED BY PRACTICE LENGTH (Phillip, 2026-10-03: a 2-hour practice gave a 30-minute stretch). The warm-up block is
+// (number of warm-up drills) x STRETCH_MINS -- our research has every stretch held ~30 seconds per side, i.e. about a minute each --
+// so it costs the same whether the practice is 60 or 120 minutes. The other stations share whatever time is left. Adding or removing
+// a warm-up drill changes ONLY the warm-up time; changing another station's minutes never touches the warm-up.
+export const STRETCH_MINS = 1
+export const WARMUP_MAX_DRILLS = 6
+
 export function buildPlan(cfg, ageGroup, duration, dbDrills = {}) {
-  const times = getTimesForDuration(cfg, ageGroup, duration)
+  const baseTimes = getTimesForDuration(cfg, ageGroup, duration)
+  const warmPool = (baseTimes.warmup || 0) > 0 ? getDrillsForStation(cfg, 'warmup', ageGroup, dbDrills).slice(0, WARMUP_MAX_DRILLS) : []
+  // never let the warm-up eat more than 40% of a (very short) practice
+  const warmDrills = warmPool.slice(0, Math.max(1, Math.floor((duration * 0.4) / STRETCH_MINS)))
+  // No named warm-up drills for this sport/age (e.g. flag football): still don't scale it -- keep the research number as written.
+  const researchWarm = Math.min(duration * 0.4, nearestBasePlan(cfg, ageGroup, duration).warmup || 0)
+  const times = warmDrills.length ? getTimesForDuration(cfg, ageGroup, duration, { warmup: warmDrills.length * STRETCH_MINS })
+    : researchWarm > 0 ? getTimesForDuration(cfg, ageGroup, duration, { warmup: researchWarm }) : baseTimes
   const pairGroupId = cfg.pairStations.length ? `pair_${cfg.pairStations.join('_')}` : null
   return cfg.stationOrder
     .filter(s => (times[s] || 0) > 0)
     .map(s => {
+      if (s === 'warmup' && warmDrills.length) {
+        return {
+          station: s, label: cfg.stationLabels[s], icon: cfg.stationIcons[s],
+          total_mins: warmDrills.length * STRETCH_MINS,
+          drills: warmDrills.map(name => ({ name, mins: STRETCH_MINS })),
+          pairGroup: cfg.pairStations.includes(s) ? pairGroupId : undefined,
+        }
+      }
       const pool = getDrillsForStation(cfg, s, ageGroup, dbDrills)
       return {
         station:    s,
@@ -481,24 +503,40 @@ export const DEFAULT_DURATION = { '6U':60, '8U':60, '10U':75, '12U':90, '14U':90
 export const MIN_DURATION = 30, MAX_DURATION = 240, STEP = 15
 
 // Scale nearest base plan proportionally to any duration
-export function getTimesForDuration(cfg, ageGroup, duration) {
+// `fixed` = { station: minutes } for stations that must NOT scale with practice length (the warm-up); the rest share what remains.
+function nearestBasePlan(cfg, ageGroup, duration) {
   const plans   = cfg.timePlans[ageGroup] || cfg.timePlans['10U'] || Object.values(cfg.timePlans)[0]
   const keys    = Object.keys(plans).map(Number).sort((a,b)=>a-b)
   const closest = keys.reduce((p,c) => Math.abs(c-duration) < Math.abs(p-duration) ? c : p)
-  const base    = plans[closest]
-  const baseSum = Object.values(base).reduce((a,b)=>a+b,0)
-  if (!baseSum) return base
-  const scale   = duration / baseSum
-  const stations= Object.keys(base)
+  return plans[closest]
+}
+
+export function getTimesForDuration(cfg, ageGroup, duration, fixed = {}) {
+  const base    = nearestBasePlan(cfg, ageGroup, duration)
+  const out = {}
+  let fixedSum = 0
+  for (const k of Object.keys(fixed)) if (k in base) { out[k] = Math.max(0, fixed[k]); fixedSum += out[k] }
+  const stations= Object.keys(base).filter(k => !(k in out))
+  const baseSum = stations.reduce((a,k)=>a+base[k],0)
+  if (!baseSum) return Object.keys(fixed).length ? { ...base, ...out } : base
+  const room    = Math.max(0, duration - fixedSum)
+  const scale   = room / baseSum
   let assigned  = 0
-  const out     = {}
-  stations.forEach((k,i) => {
-    if (i === stations.length-1) {
-      out[k] = Math.max(0, duration - assigned)
-    } else {
-      out[k] = Math.max(0, Math.round(base[k] * scale))
-      assigned += out[k]
-    }
+  // the last station that has time absorbs rounding so the total always equals the practice length
+  const lastUsed = [...stations].reverse().find(k => base[k] > 0) || stations[stations.length-1]
+  stations.forEach(k => {
+    if (k === lastUsed) return
+    out[k] = Math.max(0, Math.round(base[k] * scale))
+    assigned += out[k]
   })
-  return out
+  out[lastUsed] = Math.max(0, room - assigned)
+  // rounding can leave the total a minute off -- take it from / give it to the biggest scaled station
+  const scaled = stations.filter(k => out[k] > 0)
+  let diff = Object.values(out).reduce((a,b)=>a+b,0) - duration
+  while (diff !== 0 && scaled.length) {
+    const big = scaled.reduce((p,c) => out[c] > out[p] ? c : p)
+    if (diff > 0 && out[big] > 0) { out[big]--; diff-- } else if (diff < 0) { out[big]++; diff++ } else break
+  }
+  // keep the original station order in the result
+  return Object.fromEntries(Object.keys(base).map(k => [k, out[k]]))
 }
