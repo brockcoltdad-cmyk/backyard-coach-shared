@@ -458,31 +458,32 @@ export function getDrillsForStation(cfg, station, ageGroup, dbDrills = {}) {
   return pool?.[ageGroup] || pool?.['all'] || []
 }
 
-// WARM-UP IS NOT SCALED BY PRACTICE LENGTH (Phillip, 2026-10-03: a 2-hour practice gave a 30-minute stretch). The warm-up block is
-// (number of warm-up drills) x STRETCH_MINS -- our research has every stretch held ~30 seconds per side, i.e. about a minute each --
-// so it costs the same whether the practice is 60 or 120 minutes. The other stations share whatever time is left. Adding or removing
-// a warm-up drill changes ONLY the warm-up time; changing another station's minutes never touches the warm-up.
+// WARM-UP IS NOT SCALED BY PRACTICE LENGTH (Phillip, 2026-10-03: a 2-hour practice gave a 30-minute stretch). The warm-up is the
+// research number for that sport/age (5-10 minutes in our timePlans) taken AS WRITTEN -- a 60-minute and a 120-minute practice get the
+// same warm-up -- and its stretches share that time. The other stations share whatever time is left. Changing another station's
+// minutes never touches the warm-up. Adding/removing a stretch in the builder moves the warm-up by STRETCH_MINS (a minute per stretch,
+// from the ~30-seconds-per-side stretch research).
 export const STRETCH_MINS = 1
 export const WARMUP_MAX_DRILLS = 6
 
 export function buildPlan(cfg, ageGroup, duration, dbDrills = {}) {
   const baseTimes = getTimesForDuration(cfg, ageGroup, duration)
-  const warmPool = (baseTimes.warmup || 0) > 0 ? getDrillsForStation(cfg, 'warmup', ageGroup, dbDrills).slice(0, WARMUP_MAX_DRILLS) : []
-  // never let the warm-up eat more than 40% of a (very short) practice
-  const warmDrills = warmPool.slice(0, Math.max(1, Math.floor((duration * 0.4) / STRETCH_MINS)))
-  // No named warm-up drills for this sport/age (e.g. flag football): still don't scale it -- keep the research number as written.
-  const researchWarm = Math.min(duration * 0.4, nearestBasePlan(cfg, ageGroup, duration).warmup || 0)
-  const times = warmDrills.length ? getTimesForDuration(cfg, ageGroup, duration, { warmup: warmDrills.length * STRETCH_MINS })
-    : researchWarm > 0 ? getTimesForDuration(cfg, ageGroup, duration, { warmup: researchWarm }) : baseTimes
+  const hasWarm = (baseTimes.warmup || 0) > 0
+  // research warm-up, unscaled, never more than 40% of a (very short) practice
+  const warmTotal = hasWarm ? Math.max(1, Math.round(Math.min(duration * 0.4, nearestBasePlan(cfg, ageGroup, duration).warmup))) : 0
+  const warmPool = hasWarm ? getDrillsForStation(cfg, 'warmup', ageGroup, dbDrills) : []
+  const warmDrills = warmPool.slice(0, Math.max(1, Math.min(WARMUP_MAX_DRILLS, warmTotal)))   // at least a minute each
+  const times = hasWarm ? getTimesForDuration(cfg, ageGroup, duration, { warmup: warmTotal }) : baseTimes
   const pairGroupId = cfg.pairStations.length ? `pair_${cfg.pairStations.join('_')}` : null
   return cfg.stationOrder
     .filter(s => (times[s] || 0) > 0)
     .map(s => {
       if (s === 'warmup' && warmDrills.length) {
+        const each = Math.max(1, Math.floor(warmTotal / warmDrills.length))
+        const drills = warmDrills.map((name, di) => ({ name, mins: each + (di < warmTotal - each * warmDrills.length ? 1 : 0) }))   // spread the remainder
         return {
           station: s, label: cfg.stationLabels[s], icon: cfg.stationIcons[s],
-          total_mins: warmDrills.length * STRETCH_MINS,
-          drills: warmDrills.map(name => ({ name, mins: STRETCH_MINS })),
+          total_mins: warmTotal, drills,
           pairGroup: cfg.pairStations.includes(s) ? pairGroupId : undefined,
         }
       }
