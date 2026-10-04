@@ -541,3 +541,55 @@ export function getTimesForDuration(cfg, ageGroup, duration, fixed = {}) {
   // keep the original station order in the result
   return Object.fromEntries(Object.keys(base).map(k => [k, out[k]]))
 }
+
+// ── KEEP THE PRACTICE EXACTLY `duration` MINUTES WHILE THE COACH EDITS (Phillip, 2026-10-03) ─────────────────────────────────────
+// Rules: the practice length is fixed; the WARM-UP is locked -- editing, skipping or practice-length changes elsewhere never move it.
+//  * Coach changes a station's minutes  -> the OTHER (non-warm-up) stations give/take the difference, proportionally. Warm-up untouched.
+//  * Coach changes the warm-up          -> the other stations absorb the difference.
+//  * Coach skips ("deletes") a station  -> its minutes go to the other stations (skip the warm-up and they get its time too).
+//  * Coach un-skips a station           -> it comes back at its remembered minutes, taken from the others.
+// anchorIdx/newMins = the block the coach just edited (omit both when only skips / length changed). Paired blocks keep equal minutes.
+export function rebalancePlan(plan, duration, anchorIdx = -1, newMins = null) {
+  const out = plan.map(b => ({ ...b }))
+  const live = i => !out[i].skipped
+  const anchor = anchorIdx >= 0 && live(anchorIdx) ? anchorIdx : -1
+  const group = anchor >= 0 ? out[anchor].pairGroup : undefined
+  const inAnchor = i => anchor >= 0 && (i === anchor || (group && out[i].pairGroup === group))
+  const fixed = out.map((_, i) => i).filter(i => live(i) && (out[i].station === 'warmup' || inAnchor(i)))
+  const flexible = out.map((_, i) => i).filter(i => live(i) && !fixed.includes(i))
+
+  if (anchor >= 0 && newMins != null) {
+    // the edited block can't take so much that other stations drop under a minute each
+    const others = fixed.filter(i => !inAnchor(i)).reduce((s, i) => s + out[i].total_mins, 0)
+    const members = fixed.filter(inAnchor).length || 1
+    const most = Math.max(1, Math.floor((duration - others - flexible.length) / members))
+    const v = Math.max(1, Math.min(Math.round(newMins), most))
+    fixed.filter(inAnchor).forEach(i => { out[i].total_mins = v })
+  }
+  const fixedSum = fixed.reduce((s, i) => s + out[i].total_mins, 0)
+  const room = duration - fixedSum
+
+  if (!flexible.length) {
+    // nobody left to trade minutes with: the edited block (else the warm-up) absorbs, so the total is still the practice length
+    const target = (anchor >= 0 ? fixed.filter(inAnchor) : fixed)
+    if (target.length) {
+      const perMember = Math.max(1, Math.round((target.reduce((s, i) => s + out[i].total_mins, 0) + room) / target.length))
+      target.forEach(i => { out[i].total_mins = perMember })
+    }
+    return out
+  }
+  // proportional share of `room` across the flexible stations, whole minutes, at least 1 each (largest-remainder rounding)
+  const weights = flexible.map(i => Math.max(0, out[i].total_mins))
+  const wSum = weights.reduce((a, b) => a + b, 0) || flexible.length
+  const spread = Math.max(room, flexible.length)
+  const raw = flexible.map((_, k) => ((weights[k] || (wSum === flexible.length ? 1 : 0)) / wSum) * spread)
+  const base = raw.map(r => Math.max(1, Math.floor(r)))
+  let left = spread - base.reduce((a, b) => a + b, 0)
+  const order = raw.map((r, k) => [r - Math.floor(r), k]).sort((a, b) => b[0] - a[0]).map(x => x[1])
+  for (let n = 0; left !== 0 && n < 10 * flexible.length; n++) {
+    const k = order[n % order.length]
+    if (left > 0) { base[k]++; left-- } else if (base[k] > 1) { base[k]--; left++ }
+  }
+  flexible.forEach((i, k) => { out[i].total_mins = base[k] })
+  return out
+}
